@@ -24,9 +24,12 @@ void AAIFriendController::CheckRange()
 		ShouldOrbit = true;
 		if (FMath::IsNearlyEqual(DistSquared2D, GoalRadius * GoalRadius, GoalThreshold * GoalThreshold))
 		{
-			ShouldMoveToRing = false;
+			ShouldMoveToRing = false; //if this is false, apply linear deceleration
 		}
 	}
+
+	ShouldMoveToHeight = !FMath::IsNearlyEqual(FriendPosition.Z, OwnerPosition.Z + HeightRelativeToPlayer, HeightThreshold);
+
 }
 
 void AAIFriendController::MoveToRing(float DeltaTime)
@@ -43,38 +46,24 @@ void AAIFriendController::MoveToRing(float DeltaTime)
 	FriendToRing.Normalize();
 
 	FVector CurrentFriendVelocity{ Pawn->GetVelocity() };
+	CurrentFriendVelocity.Z = 0;
 
 	FVector ProjectedVelocity{ CurrentFriendVelocity.ProjectOnTo(FriendToRing) };
 	FVector TangentialVelocity{ CurrentFriendVelocity - ProjectedVelocity };
 
 	FVector NewVelocity;
 
-	if (!ShouldMoveToRing) //no velocity
+	if (!ShouldMoveToRing)
 	{
-		NewVelocity = FVector::ZeroVector;
+		NewVelocity = NewVelocity.GetClampedToMaxSize(FMath::Max(0.0f, CurrentFriendVelocity.Size() - DecelerationTowardsRing * DeltaTime));
 	}
-	else if (!ShouldOrbit)
+	else
 	{
-		//strip away the tangential velocity
-		NewVelocity = TangentialVelocity * 0.95f + ProjectedVelocity;
-		//accelerate towards ring
-		NewVelocity += FriendToRing.GetSafeNormal() * AccelerationTowardsRing * DeltaTime;
+		float FriendToRingMag = FriendToRing.Size();
+		NewVelocity = CurrentFriendVelocity + (FriendToRing / FriendToRingMag) * AccelerationTowardsRing * FMath::Pow(FriendToRingMag, 1.5f) * DeltaTime;
 	}
-	else //leave tangential velocity alone, Orbit() will deal with it
-	{
-		NewVelocity = CurrentFriendVelocity;
-		FVector TempVelocity{ NewVelocity - FriendToRing.GetSafeNormal() * DecelerationTowardsRing * DeltaTime };
-		if (FVector::DotProduct(NewVelocity, TempVelocity) < 0)
-		{
-			NewVelocity = FVector::ZeroVector;
-		}
-		else
-		{
-			NewVelocity = TempVelocity;
-		}
-	}
-
-	NewVelocity.Z = CurrentFriendVelocity.Z; //MoveToHeight() will deal with Z
+	
+	NewVelocity.Z = PawnMoveComp->Velocity.Z; //MoveToHeight() will deal with Z
 	PawnMoveComp->Velocity = NewVelocity;
 }
 
@@ -83,7 +72,7 @@ void AAIFriendController::RepelFromOwner(float DeltaTime)
 	FVector OwnerPosition{ Owner->GetActorLocation() };
 	FVector RelativeFriendPosition{ Pawn->GetActorLocation() - OwnerPosition };
 	//too close to player
-	if (RelativeFriendPosition.SizeSquared2D() < (GoalRadius - OrbitThreshold) * (GoalRadius - OrbitThreshold))
+	if (RelativeFriendPosition.SizeSquared2D() < (GoalRadius - 2 * OrbitThreshold) * (GoalRadius - 2 * OrbitThreshold))
 	{
 		FRay OwnerToFriendDir(OwnerPosition, RelativeFriendPosition);
 		FVector RingPoint{ OwnerToFriendDir.PointAt(GoalRadius) };
@@ -93,7 +82,7 @@ void AAIFriendController::RepelFromOwner(float DeltaTime)
 		FriendToRing.Z = 0;
 		FriendToRing.Normalize();
 
-		PawnMoveComp->Velocity += FriendToRing * 1500 * DeltaTime;
+		PawnMoveComp->Velocity += FriendToRing * 150 * DeltaTime;
 	}
 }
 
@@ -104,88 +93,49 @@ void AAIFriendController::Orbit(float DeltaTime)
 
 void AAIFriendController::MoveToHeight(float DeltaTime)
 {
-
+	if (!ShouldMoveToHeight)
+	{
+		if (PawnMoveComp->Velocity.Z > 0)
+		{
+			PawnMoveComp->Velocity.Z = FMath::Max(0.0f, PawnMoveComp->Velocity.Z - DecelerationTowardsHeight * DeltaTime);
+		}
+		else if (PawnMoveComp->Velocity.Z < 0)
+		{
+			PawnMoveComp->Velocity.Z = FMath::Min(0.0f, PawnMoveComp->Velocity.Z + DecelerationTowardsHeight * DeltaTime);
+		}
+		//GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, FString::Printf(TEXT("Nope %f"), PawnMoveComp->Velocity.Z));
+	}
+	else
+	{
+		float CurrentHeight = Pawn->GetActorLocation().Z;
+		GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, FString::Printf(TEXT("H1 %f"), CurrentHeight));
+		float DesiredHeight = Owner->GetActorLocation().Z + HeightRelativeToPlayer;
+		GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, FString::Printf(TEXT("H2 %f"), DesiredHeight));
+		float RelativeHeight = CurrentHeight - DesiredHeight;
+		int Direction = RelativeHeight < 0 ? 1 : -1;
+		PawnMoveComp->Velocity.Z += Direction * AccelerationTowardsHeight * FMath::Pow(FMath::Abs(RelativeHeight / HeightThreshold), 1.5f) * DeltaTime;
+		//GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, FString::Printf(TEXT("%f"), PawnMoveComp->Velocity.Z));
+	}
 }
 
+int Next = 20;
+FVector RandAcceleration{};
 void AAIFriendController::Tick(float DeltaTime)
 {
 	Pawn = GetPawn();
 	//determine whether we can orbit and what our target destination is
 	CheckRange();
-	RepelFromOwner(DeltaTime);
+	//RepelFromOwner(DeltaTime);
 	MoveToRing(DeltaTime);
 	MoveToHeight(DeltaTime);
-	//	FVector Position = GetPawn()->GetActorLocation();
-	//	//GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, FString::Printf(TEXT("Pawn %f %f %f"), Position.X, Position.Y, Position.Z));
-	//	FVector OwnerPosition = Owner->GetActorLocation();
-	//	//GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, FString::Printf(TEXT("Owner %f %f %f"), OwnerPosition.X, OwnerPosition.Y, OwnerPosition.Z));
-	//	float DistSquared2D = FVector::DistSquared2D(Position, OwnerPosition);
-	//	//GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, FString::Printf(TEXT("Dist %f"), DistSquared2D));
-	//	if (FMath::IsNearlyEqual(DistSquared2D, GoalRadius))
-	//	{
-	//		GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, TEXT("A"));
-	//		//do nothing
-	//	}
-	//	else
-	//	{
-	//		//GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, TEXT("B"));
-	//		//normalized direction from owner to position
-	//		FVector OwnerToFriend = Position - OwnerPosition;
-	//		OwnerToFriend.Normalize();
-	//		//FRay Ray(OwnerPosition, OwnerToFriend, true);
-	//		//FVector DesiredPos = Ray.PointAt(GoalRadius);
-	//		//GetPawn()->SetActorLocation(FVector(DesiredPos.X, DesiredPos.Y, OwnerPosition.Z + HeightRelativeToPlayer));
-	//		if (GoalRadius * GoalRadius * 0.95f < DistSquared2D && GoalRadius * GoalRadius * 1.05f > DistSquared2D)
-	//		{
-	//
-	//			//GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, FString::Printf(TEXT("C %d"), DistSquared2D));
-	//			FVector HorizVelocity = GetPawn()->GetVelocity();
-	//			FVector VelocityTowardsOwner = HorizVelocity.ProjectOnToNormal(-OwnerToFriend);
-	//			FVector NewVelocity = (HorizVelocity - VelocityTowardsOwner) * 0.95f + VelocityTowardsOwner; //temporary
-	//			NewVelocity -= (OwnerPosition - Position).GetSafeNormal() * 1500.0f * DeltaTime;
-	//			NewVelocity.Z = PawnMoveComp->Velocity.Z;
-	//			PawnMoveComp->Velocity = NewVelocity;
-	//		}
-	//		else
-	//		{
-	//			GEngine->AddOnScreenDebugMessage(
-	//				-1, 1.0f, FColor::Yellow,
-	//				FString::Printf(TEXT("OldVel %f %f %f"),
-	//					PawnMoveComp->Velocity.X,
-	//					PawnMoveComp->Velocity.Y,
-	//					PawnMoveComp->Velocity.Z));
-	//			//GEngine->AddOnScreenDebugMessage(-1, 1.0f, FColor::Yellow, TEXT("D"));
-	//			FVector HorizVelocity = GetPawn()->GetVelocity();
-	//			HorizVelocity.Z = 0;
-	//			GEngine->AddOnScreenDebugMessage(
-	//				-1, 1.0f, FColor::Yellow, 
-	//				FString::Printf(TEXT("HorizVel %f %f %f"),
-	//					HorizVelocity.X,
-	//					HorizVelocity.Y,
-	//					HorizVelocity.Z));
-	//			FVector VelocityTowardsOwner = HorizVelocity.ProjectOnToNormal(-OwnerToFriend);
-	//			VelocityTowardsOwner.Z = 0;
-	//			//GEngine->AddOnScreenDebugMessage(
-	//			//	-1, 1.0f, FColor::Yellow,
-	//			//	FString::Printf(TEXT("TowardOwner %f %f %f"),
-	//			//		VelocityTowardsOwner.X,
-	//			//		VelocityTowardsOwner.Y,
-	//			//		VelocityTowardsOwner.Z));
-	//			FVector NewVelocity = (HorizVelocity - VelocityTowardsOwner) * 0.95f + VelocityTowardsOwner;
-	//			NewVelocity += (OwnerPosition - Position).GetSafeNormal() * 1500.0f * DeltaTime;
-	//			GEngine->AddOnScreenDebugMessage(
-	//				-1, 1.0f, FColor::Yellow,
-	//				FString::Printf(TEXT("NewVel %f %f %f"),
-	//					NewVelocity.X,
-	//					NewVelocity.Y,
-	//					NewVelocity.Z));
-	//			NewVelocity.Z = PawnMoveComp->Velocity.Z;
-	//			PawnMoveComp->Velocity = NewVelocity;
-	//			//increase velocity
-	//		}
-	//		Position = GetPawn()->GetActorLocation();
-	//		OwnerPosition = Owner->GetActorLocation();
-	//		GetPawn()->SetActorLocation(FVector(Position.X, Position.Y, OwnerPosition.Z + HeightRelativeToPlayer));
+
+	//Next--;
+	//if (Next <= 0)
+	//{
+	//	RandAcceleration = FMath::VRand() * 1000.0f;
+	//	Next = 20;
+	//}
+	//PawnMoveComp->Velocity += RandAcceleration * DeltaTime;
 
 	Pawn = nullptr;
 }
